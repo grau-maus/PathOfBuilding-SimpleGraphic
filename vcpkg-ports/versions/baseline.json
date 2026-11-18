@@ -11,7 +11,18 @@
         "angle": { "baseline": "chromium_5414", "port-version": 9 },
         "glfw3": { "baseline": "3.4", "port-version": 1 },
         "gli": { "baseline": "2021-07-06", "port-version": 3 },
-        "luajit": { "baseline": "2025-07-24", "port-version": 3 },
+        "luajit": { "baseline": "2025-07-24", "port-version": 1 }
+    },
+    "2026-07-22": {
+        "glfw3": { "baseline": "3.4", "port-version": 1 },
+        "gli": { "baseline": "2021-07-06", "port-version": 3 },
+        "luajit": { "baseline": "2026-07-20", "port-version": 1 }
+    },
+    "2026-09-09": {
+        "angle": { "baseline": "chromium_5414", "port-version": 9 },
+        "glfw3": { "baseline": "3.4", "port-version": 1 },
+        "gli": { "baseline": "2026-09-09", "port-version": 0 },
+        "luajit": { "baseline": "2026-07-20", "port-version": 2 },
         "openssl": { "baseline": "3.5.4", "port-version": 0 },
         "pthread-stubs": { "baseline": "0.4", "port-version": 0 }
     }

@@ -142,14 +142,14 @@ std::optional<std::string> BuildGlobPattern(std::filesystem::path const& glob)
 {
 	using namespace std::literals::string_view_literals;
 	auto globStr = glob.generic_u8string();
-	auto globView = std::string_view(globStr);
+	auto globView = std::string_view((const char*)globStr.data(), globStr.size());
 
 	// Deal with traditional "everything" wildcards.
 	if (globView == "*" || globView == "*.*") {
 		return {};
 	}
 
-	auto u32Str = IndexUTF8ToUTF32(globStr);
+	auto u32Str = IndexUTF8ToUTF32(globView);
 	auto& offsets = u32Str.sourceCodeUnitOffsets;
 
 	fmt::memory_buffer buf;
@@ -202,8 +202,8 @@ bool GlobMatch(std::optional<std::string> const& globPattern, std::filesystem::p
 	reOpts.set_case_sensitive(false);
 	RE2 reGlob{globPattern.value(), reOpts};
 
-	auto fileStr = file.generic_u8string();
-	return RE2::FullMatch(fileStr, reGlob);
+	auto fileU8 = file.generic_u8string();
+	return RE2::FullMatch(std::string_view((const char*)fileU8.data(), fileU8.size()), reGlob);
 }
 
 bool find_c::FindFirst(std::filesystem::path const&& fileSpec)
@@ -450,23 +450,39 @@ void sys_main_c::SpawnProcess(std::filesystem::path cmdName, const char* argList
 #endif
 }
 
-std::string GetWineHostVersion()
+// get wine host OS type and x.y.z format version of wine
+std::tuple<std::string, std::string> GetWineHostVersion()
 {
 #ifdef _WIN32
 	using WineHostVersionFun = void(const char** /*sysname*/, const char** /*release*/);
+	using WineVersionFun = char *();
 	HMODULE mod = GetModuleHandleA("ntdll.dll");
 	if (!mod)
-		return "";
+		return {"", ""};
 	auto ptr = GetProcAddress(mod, "wine_get_host_version");
 	if (!ptr)
-		return "";
+		return {"", ""};
+	auto verPtr = GetProcAddress(mod, "wine_get_version");
+	if (!verPtr)
+		return {"", ""};
 	auto fun = (WineHostVersionFun*)ptr;
 	const char* sysname{};
 	const char* release{};
 	fun(&sysname, &release);
-	return sysname ? sysname : "";
+
+	auto verFun = (WineVersionFun *)verPtr;
+	// version in x.y.z format
+	const char *version = verFun();
+	if (sysname && version)
+	{
+		return {sysname, version};
+	}
+	else
+	{
+		return {"", ""};
+	}
 #else
-	return "";
+	return {"", ""};
 #endif
 }
 
@@ -474,14 +490,22 @@ std::string GetWineHostVersion()
 const char* PlatformOpenURL(const char* url)
 {
 #ifdef _WIN32
-	const std::string wineHost = GetWineHostVersion();
-	/*
-	Wine has some loosely determined maximum length on how long of an URL
-	can be, so we pick a "safe" maximum and refuse to open anything longer.
-	*/
-	if ((wineHost == "Linux" || wineHost == "Darwin") && strlen(url) > 1500)
-		return AllocString("Did not open URL, length likely too long for the OS.");
-	ShellExecuteA(NULL, "open", url, NULL, NULL, SW_SHOWDEFAULT);
+	auto [wineHost, wineVersion] = GetWineHostVersion();
+	int major = INT_MAX;
+	int minor = INT_MAX;
+	auto match = RE2::PartialMatch(wineVersion, "^(\\d+)\\.(\\d+)", &major, &minor);
+	// work around a pre-8.17 wine bug where long urls may cause a stack corruption and overflow
+	bool invalidVersion = (major < 8) || (major == 8 && minor < 17);
+	if ((wineHost == "Linux" || wineHost == "Darwin") && strlen(url) > 1500 && invalidVersion)
+	{
+		return AllocString("Did not open URL, length likely too long for pre-8.17 Wine versions.");
+	}
+	auto retVal = (INT_PTR)ShellExecuteA(NULL, "open", url, NULL, NULL, SW_SHOWDEFAULT);
+	// "If the function succeeds, it returns a value greater than 32"
+	if (retVal <= 32)
+	{
+		return AllocString("Opening URL failed.");
+	}
 	return nullptr;
 #else
 	std::string cmd = std::string("xdg-open ") + url + " &";

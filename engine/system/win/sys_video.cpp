@@ -108,7 +108,7 @@ sys_video_c::sys_video_c(sys_IMain* sysHnd)
 
 	int platformType = GLFW_ANGLE_PLATFORM_TYPE_NONE;
 #ifdef _WIN32
-	const std::string wineHost = GetWineHostVersion();
+	auto [wineHost, _] = GetWineHostVersion();
 	if (wineHost == "Linux")
 		platformType = GLFW_ANGLE_PLATFORM_TYPE_OPENGL;
 	else if (wineHost == "Darwin")
@@ -318,6 +318,7 @@ bool ShouldIgnoreDpiScale() {
 	struct ScopedRegKey {
 		HKEY key{};
 
+		ScopedRegKey() = default;
 		ScopedRegKey& operator = (ScopedRegKey const&) = delete;
 		ScopedRegKey(ScopedRegKey const&) = delete;
 		~ScopedRegKey() {

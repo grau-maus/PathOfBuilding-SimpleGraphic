@@ -10,6 +10,7 @@
 #include "core_config.h"
 
 #include <fmt/core.h>
+#include <fmt/format.h>
 
 // =======================
 // core_IConfig Interface
@@ -158,7 +159,8 @@ bool core_config_c::LoadConfig(std::filesystem::path const& cfgName)
 	auto fileName = cfgName;
 	fileName.replace_extension(".cfg");
 
-	sys->con->Print(fmt::format("Executing {}\n", fileName.generic_u8string()).c_str());
+	const auto fileNameU8 = fileName.generic_u8string();
+	sys->con->Print(fmt::format("Executing {}\n", std::string_view((const char*)fileNameU8.data(), fileNameU8.size())).c_str());
 
 	// Read the config file
 	fileInputStream_c f;
@@ -202,7 +204,8 @@ bool core_config_c::SaveConfig(std::filesystem::path const& cfgName)
 	auto fileName = cfgName;
 	fileName.replace_extension(".cfg");
 
-	sys->con->Print(fmt::format("Saving {}\n", fileName.generic_u8string()).c_str());
+	const auto fileNameU8 = fileName.generic_u8string();
+	sys->con->Print(fmt::format("Saving {}\n", std::string_view((const char*)fileNameU8.data(), fileNameU8.size())).c_str());
 
 	// Open the config file
 	fileOutputStream_c f;

@@ -60,8 +60,8 @@
 ** GetDrawLayer()
 ** SetViewport([x, y, width, height])
 ** SetDrawColor(red, green, blue[, alpha]) / SetDrawColor("<escapeStr>")
-** DrawImage({imgHandle|nil}, left, top, width, height[, tcLeft, tcTop, tcRight, tcBottom][, stackIdx[, maskIdx]])  maskIdx: use a stack layer as multiplicative mask
-** DrawImageQuad({imgHandle|nil}, x1, y1, x2, y2, x3, y3, x4, y4[, s1, t1, s2, t2, s3, t3, s4, t4][, stackIdx[, maskIdx]])
+** DrawImage({imgHandle|nil}, left, top, width, height[, tcLeft, tcTop, tcRight, tcBottom][, stackIdx])
+** DrawImageQuad({imgHandle|nil}, x1, y1, x2, y2, x3, y3, x4, y4[, s1, t1, s2, t2, s3, t3, s4, t4][, stackIdx])
 ** DrawString(left, top, align{"LEFT"|"CENTER"|"RIGHT"|"CENTER_X"|"RIGHT_X"}, height, font{"FIXED"|"VAR"|"VAR BOLD"|"FONTIN SC"|"FONTIN SC ITALIC"|"FONTIN"|"FONTIN ITALIC"}, "<text>")
 ** width = DrawStringWidth(height, font{"FIXED"|"VAR"|"VAR BOLD"|"FONTIN SC"|"FONTIN SC ITALIC"|"FONTIN"|"FONTIN ITALIC"}, "<text>")
 ** index = DrawStringCursorIndex(height, font{"FIXED"|"VAR"|"VAR BOLD"|"FONTIN SC"|"FONTIN SC ITALIC"|"FONTIN"|"FONTIN ITALIC"}, "<text>", cursorX, cursorY)
@@ -84,7 +84,9 @@
 ** Copy("<string>")
 ** string = Paste()
 ** compressed = Deflate(uncompressed)
+** compressedGzip = Deflate(uncompressed, true)
 ** uncompressed = Inflate(compressed)
+** uncompressedGzip = Inflate(compressedGzip)
 ** msec = GetTime()
 ** path[, pathACP[, err]] = GetScriptPath()
 ** path[, pathACP[, err]] = GetRuntimePath()
@@ -162,7 +164,7 @@ static int l_##Name(lua_State* L) {                                \
 			lua_pushfstring(L, "C++ exception:\n%s", e.what()); \
 			return -1;                                          \
 		}                                                       \
-    };                                                          \
+	};                                                          \
 	int rc = fun(L);                                            \
 	if (rc < 0) { LuaErrorWrapper(L); }                         \
 	return rc; }
@@ -427,7 +429,8 @@ SG_LUA_CPP_FUN_BEGIN(imgHandleLoad)
 		}
 	}
 	// TODO(LV): should we use u8path throughout here, to support any callers that use paths outside of working directory?
-	imgHandle->hnd = ui->renderer->RegisterShader(fileName.generic_u8string(), flags);
+	auto shaderName = fileName.generic_u8string();
+	imgHandle->hnd = ui->renderer->RegisterShader(std::string_view((const char*)shaderName.data(), shaderName.size()), flags);
 	return 0;
 }
 SG_LUA_CPP_FUN_END()
@@ -811,18 +814,6 @@ static int l_SetViewport(lua_State* L)
 	return 0;
 }
 
-static int l_SetBlendMode(lua_State* L)
-{
-	ui_main_c* ui = GetUIPtr(L);
-	ui->LAssert(L, ui->renderer != NULL, "Renderer is not initialised");
-	ui->LAssert(L, ui->renderEnable, "SetViewport() called outside of OnFrame");
-	int n = lua_gettop(L);
-	ui->LAssert(L, n >= 1, "Usage: SetBlendMode(mode)");
-	static const char* modeMap[6] = { "ALPHA", "PREALPHA", "ADDITIVE", NULL };
-	ui->renderer->SetBlendMode(luaL_checkoption(L, 1, "ALPHA", modeMap));
-	return 0;
-}
-
 static int l_SetDrawColor(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
@@ -832,19 +823,29 @@ static int l_SetDrawColor(lua_State* L)
 	ui->LAssert(L, n >= 1, "Usage: SetDrawColor(red, green, blue[, alpha]) or SetDrawColor(escapeStr)");
 	col4_t color;
 	if (lua_type(L, 1) == LUA_TSTRING) {
-		ui->LAssert(L, IsColorEscape(lua_tostring(L, 1)), "SetDrawColor() argument 1: invalid color escape sequence");
-		ReadColorEscape(lua_tostring(L, 1), color);
+		const char *str = lua_tostring(L, 1);
+		int len = IsColorEscape(str);
+		ui->LAssert(L, len, "SetDrawColor() argument 1: invalid color escape sequence");
+		ReadColorEscape(str, len, color);
 		color[3] = 1.0;
 	}
 	else {
 		ui->LAssert(L, n >= 3, "Usage: SetDrawColor(red, green, blue[, alpha]) or SetDrawColor(escapeStr)");
 		for (int i = 1; i <= 3; i++) {
-			ui->LAssert(L, lua_isnumber(L, i), "SetDrawColor() argument %d: expected number, got %s", i, luaL_typename(L, i));
-			color[i - 1] = (float)lua_tonumber(L, i);
+			int isnum;
+			lua_Number val = lua_tonumberx(L, i, &isnum);
+			if (!isnum) {
+				ui->LAssert(L, false, "SetDrawColor() argument %d: expected number, got %s", i, luaL_typename(L, i));
+			}
+			color[i - 1] = (float)val;
 		}
 		if (n >= 4 && !lua_isnil(L, 4)) {
-			ui->LAssert(L, lua_isnumber(L, 4), "SetDrawColor() argument 4: expected number or nil, got %s", luaL_typename(L, 4));
-			color[3] = (float)lua_tonumber(L, 4);
+			int isnum;
+			lua_Number val = lua_tonumberx(L, 4, &isnum);
+			if (!isnum) {
+				ui->LAssert(L, false, "SetDrawColor() argument 4: expected number or nil, got %s", luaL_typename(L, 4));
+			}
+			color[3] = (float)val;
 		}
 		else {
 			color[3] = 1.0;
@@ -882,29 +883,28 @@ static int l_DrawImage(lua_State* L)
 	ui->LAssert(L, ui->renderer != NULL, "Renderer is not initialised");
 	ui->LAssert(L, ui->renderEnable, "DrawImage() called outside of OnFrame");
 	int n = lua_gettop(L);
-	const char* usage = "Usage: DrawImage({imgHandle|nil}, left, top, width, height[, tcLeft, tcTop, tcRight, tcBottom][, stackIdx[, mask]])";
+	const char* usage = "Usage: DrawImage({imgHandle|nil}, left, top, width, height[, tcLeft, tcTop, tcRight, tcBottom][, stackIdx])";
 	ui->LAssert(L, n >= 5, usage);
-	ui->LAssert(L, lua_isnil(L, 1) || ui->IsUserData(L, 1, "uiimghandlemeta"), "DrawImage() argument 1: expected image handle or nil, got %s", luaL_typename(L, 1));
+
+	if (!lua_isnil(L, 1) && !ui->IsUserData(L, 1, "uiimghandlemeta")) {
+		ui->LAssert(L, false, "DrawImage() argument 1: expected image handle or nil, got %s", luaL_typename(L, 1));
+	}
+
 	r_shaderHnd_c* hnd = NULL;
 	glm::vec2 xys[2]{}, uvs[2]{};
 	int stackLayer = 0;
-	std::optional<int> maskLayer{};
 
-	// | n  |img| corners | uvs | stack | mask |
-	// | 5  | X | X       |	    |       |      |
-	// | 6  | X | X       |     | X     |      |
-	// | 7  | X | X       |     | X     | X    |
-	// | 9  | X | X       | X   |       |      |
-	// | 10 | X | X       | X   | X     |      |
-	// | 11 | X | X       | X   | X     | X    |
-	
-	enum ArgFlag : uint8_t { AF_IMG = 0x1, AF_XY = 0x2, AF_UV = 0x4, AF_STACK = 0x8, AF_MASK = 0x10 };
+	// | n  |img| corners | uvs | stack |
+	// | 5  | X | X       |	    |       |
+	// | 6  | X | X       |     | X     |
+	// | 9  | X | X       | X   |       |
+	// | 10 | X | X       | X   | X     |
+
+	enum ArgFlag : uint8_t { AF_IMG = 0x1, AF_XY = 0x2, AF_UV = 0x4, AF_STACK = 0x8 };
 	ArgFlag af{};
 	switch (n) {
-	case 11: af = (ArgFlag)(af | AF_MASK);
 	case 10: af = (ArgFlag)(af | AF_STACK);
 	case 9: af = (ArgFlag)(af | AF_IMG | AF_XY | AF_UV); break;
-	case 7: af = (ArgFlag)(af | AF_MASK);
 	case 6: af = (ArgFlag)(af | AF_STACK);
 	case 5: af = (ArgFlag)(af | AF_IMG | AF_XY); break;
 	default: ui->LAssert(L, false, usage);
@@ -919,22 +919,32 @@ static int l_DrawImage(lua_State* L)
 		}
 		k += 1;
 	}
-	
+
 	if (af & AF_XY) {
 		const float dpiScale = ui->renderer->VirtualScreenScaleFactor();
 		for (int i = k; i < k + 4; i++) {
-			ui->LAssert(L, lua_isnumber(L, i), "DrawImage() argument %d: expected number, got %s", i, luaL_typename(L, i));
+			int isNum;
+			lua_Number val = lua_tonumberx(L, i, &isNum);
+
+			if (!isNum) {
+				ui->LAssert(L, false, "DrawImage() argument %d: expected number, got %s", i, luaL_typename(L, i));
+			}
 			const int idx = i - k;
-			xys[idx/2][idx%2] = (float)lua_tonumber(L, i) * dpiScale;
+			xys[idx/2][idx%2] = (float)val * dpiScale;
 		}
 		k += 4;
 	}
 
 	if (af & AF_UV) {
 		for (int i = k; i < k + 4; i++) {
-			ui->LAssert(L, lua_isnumber(L, i), "DrawImage() argument %d: expected number, got %s", i, luaL_typename(L, i));
+			int isNum;
+			lua_Number val = lua_tonumberx(L, i, &isNum);
+
+			if (!isNum) {
+				ui->LAssert(L, false, "DrawImage() argument %d: expected number, got %s", i, luaL_typename(L, i));
+			}
 			int idx = i - k;
-			uvs[idx/2][idx%2] = (float)lua_tonumber(L, i);
+			uvs[idx/2][idx%2] = (float)val;
 		}
 		k += 4;
 	}
@@ -948,8 +958,12 @@ static int l_DrawImage(lua_State* L)
 		maxStackValue = hnd->StackCount();
 
 	if (af & AF_STACK) {
-		ui->LAssert(L, lua_isinteger(L, k), "DrawImage() argument %d: expected integer, got %s", k, luaL_typename(L, k));
-		const int val = (int)lua_tointeger(L, k);
+		int isInt;
+		int val = (int)lua_tointegerx(L, k, &isInt);
+
+		if (!isInt) {
+			ui->LAssert(L, false, "DrawImage() argument %d: expected integer, got %s", k, luaL_typename(L, k));
+		}
 		ui->LAssert(L, val > 0, "DrawImage() argument %d: expected positive integer, got %d", k, val);
 		if (maxStackValue.has_value())
 			ui->LAssert(L, val <= *maxStackValue, "DrawImage() argument %d: expected valid stack index <= %d, got %d", k, *maxStackValue, val);
@@ -957,19 +971,7 @@ static int l_DrawImage(lua_State* L)
 		k += 1;
 	}
 
-	if (af & AF_MASK) {
-		ui->LAssert(L, lua_isnil(L, k) || lua_isinteger(L, k), "DrawImage() argument %d: expected integer or nil, got %s", k, luaL_typename(L, k));
-		if (lua_isinteger(L, k)) {
-			const int val = (int)lua_tointeger(L, k);
-			ui->LAssert(L, val > 0, "DrawImage() argument %d: expected positive integer, got %d", k, val);
-			if (maxStackValue.has_value())
-				ui->LAssert(L, val <= *maxStackValue, "DrawImage() argument %d: expected valid stack index <= %d, got %d", k, *maxStackValue, val);
-			maskLayer = val - 1;
-		}
-		k += 1;
-	}
-
-	ui->renderer->DrawImage(hnd, xys[0], xys[1], uvs[0], uvs[1], stackLayer, maskLayer);
+	ui->renderer->DrawImage(hnd, xys[0], xys[1], uvs[0], uvs[1], stackLayer);
 
 	return 0;
 }
@@ -980,30 +982,27 @@ static int l_DrawImageQuad(lua_State* L)
 	ui->LAssert(L, ui->renderer != NULL, "Renderer is not initialised");
 	ui->LAssert(L, ui->renderEnable, "DrawImageQuad() called outside of OnFrame");
 	int n = lua_gettop(L);
-	const char* usage = "Usage: DrawImageQuad({imgHandle|nil}, x1, y1, x2, y2, x3, y3, x4, y4[, s1, t1, s2, t2, s3, t3, s4, t4][, stackIdx[, mask]])";
+	const char* usage = "Usage: DrawImageQuad({imgHandle|nil}, x1, y1, x2, y2, x3, y3, x4, y4[, s1, t1, s2, t2, s3, t3, s4, t4][, stackIdx])";
 	ui->LAssert(L, n >= 9, usage);
-	ui->LAssert(L, lua_isnil(L, 1) || ui->IsUserData(L, 1, "uiimghandlemeta"), "DrawImageQuad() argument 1: expected image handle or nil, got %s", luaL_typename(L, 1));
+	if (!lua_isnil(L, 1) && ! ui->IsUserData(L, 1, "uiimghandlemeta")) {
+		ui->LAssert(L, false, "DrawImageQuad() argument 1: expected image handle or nil, got %s", luaL_typename(L, 1));
+	}
 
 	r_shaderHnd_c* hnd = NULL;
 	glm::vec2 xys[4]{}, uvs[4]{};
 	int stackLayer = 0;
-	std::optional<int> maskLayer{};
 	
-	// | n  |img| corners | uvs | stack | mask |
-	// | 9  | X | X       |	    |       |      |
-	// | 10 | X | X       |     | X     |      |
-	// | 11 | X | X       |     | X     | X    |
-	// | 17 | X | X       | X   |       |      |
-	// | 18 | X | X       | X   | X     |      |
-	// | 19 | X | X       | X   | X     | X    |
+	// | n  |img| corners | uvs | stack |
+	// | 9  | X | X       |	    |       |
+	// | 10 | X | X       |     | X     |
+	// | 17 | X | X       | X   |       |
+	// | 18 | X | X       | X   | X     |
 
-	enum ArgFlag : uint8_t { AF_IMG = 0x1, AF_XY = 0x2, AF_UV = 0x4, AF_STACK = 0x8, AF_MASK = 0x10 };
+	enum ArgFlag : uint8_t { AF_IMG = 0x1, AF_XY = 0x2, AF_UV = 0x4, AF_STACK = 0x8 };
 	ArgFlag af{};
 	switch (n) {
-	case 19: af = (ArgFlag)(af | AF_MASK);
 	case 18: af = (ArgFlag)(af | AF_STACK);
 	case 17: af = (ArgFlag)(af | AF_IMG | AF_XY | AF_UV); break;
-	case 11: af = (ArgFlag)(af | AF_MASK);
 	case 10: af = (ArgFlag)(af | AF_STACK);
 	case 9: af = (ArgFlag)(af | AF_IMG | AF_XY); break;
 	default: ui->LAssert(L, false, usage);
@@ -1022,18 +1021,28 @@ static int l_DrawImageQuad(lua_State* L)
 	if (af & AF_XY) {
 		const float dpiScale = ui->renderer->VirtualScreenScaleFactor();
 		for (int i = k; i < k + 8; i++) {
-			ui->LAssert(L, lua_isnumber(L, i), "DrawImageQuad() argument %d: expected number, got %s", i, luaL_typename(L, i));
+			int isNum;
+			lua_Number val = lua_tonumberx(L, i, &isNum);
+
+			if (!isNum) {
+				ui->LAssert(L, false, "DrawImageQuad() argument %d: expected number, got %s", i, luaL_typename(L, i));
+			}
 			const int idx = i - k;
-			xys[idx / 2][idx % 2] = (float)lua_tonumber(L, i) * dpiScale;
+			xys[idx / 2][idx % 2] = (float)val * dpiScale;
 		}
 		k += 8;
 	}
 
 	if (af & AF_UV) {
 		for (int i = k; i < k + 8; i++) {
-			ui->LAssert(L, lua_isnumber(L, i), "DrawImageQuad() argument %d: expected number, got %s", i, luaL_typename(L, i));
+			int isNum;
+			lua_Number val = lua_tonumberx(L, i, &isNum);
+
+			if (!isNum) {
+				ui->LAssert(L, false, "DrawImageQuad() argument %d: expected number, got %s", i, luaL_typename(L, i));
+			}
 			int idx = i - k;
-			uvs[idx / 2][idx % 2] = (float)lua_tonumber(L, i);
+			uvs[idx / 2][idx % 2] = (float)val;
 		}
 		k += 8;
 	}
@@ -1049,8 +1058,12 @@ static int l_DrawImageQuad(lua_State* L)
 		maxStackValue = hnd->StackCount();
 
 	if (af & AF_STACK) {
-		ui->LAssert(L, lua_isinteger(L, k), "DrawImageQuad() argument %d: expected integer, got %s", k, luaL_typename(L, k));
-		const int val = (int)lua_tointeger(L, k);
+		int isInt;
+		const int val = (int)lua_tointegerx(L, k, &isInt);
+
+		if (!isInt) {
+			 ui->LAssert(L, false, "DrawImageQuad() argument %d: expected integer, got %s", k, luaL_typename(L, k));
+		}
 		ui->LAssert(L, val > 0, "DrawImageQuad() argument %d: expected positive integer, got %d", k, val);
 		if (maxStackValue.has_value())
 			ui->LAssert(L, val <= *maxStackValue, "DrawImageQuad() argument %d: expected valid stack index <= %d, got %d", k, *maxStackValue, val);
@@ -1058,20 +1071,7 @@ static int l_DrawImageQuad(lua_State* L)
 		k += 1;
 	}
 
-	if (af & AF_MASK) {
-		ui->LAssert(L, lua_isnil(L, k) || lua_isinteger(L, k), "DrawImageQuad() argument %d: expected integer or nil, got %s", k, luaL_typename(L, k));
-		if (lua_isinteger(L, k)) {
-			const int val = (int)lua_tointeger(L, k);
-			ui->LAssert(L, val > 0, "DrawImageQuad() argument %d: expected positive integer, got %d", k, val);
-			if (maxStackValue.has_value())
-				ui->LAssert(L, val <= *maxStackValue, "DrawImageQuad() argument %d: expected valid stack index <= %d, got %d", k, *maxStackValue, val);
-			maskLayer = val - 1;
-		}
-		k += 1;
-	}
-
-
-	ui->renderer->DrawImageQuad(hnd, xys[0], xys[1], xys[2], xys[3], uvs[0], uvs[1], uvs[2], uvs[3], stackLayer, maskLayer);
+	ui->renderer->DrawImageQuad(hnd, xys[0], xys[1], xys[2], xys[3], uvs[0], uvs[1], uvs[2], uvs[3], stackLayer);
 
 	return 0;
 }
@@ -1352,7 +1352,7 @@ static int l_searchHandleGetFileName(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
 	searchHandle_s* searchHandle = GetSearchHandle(L, ui, "GetFileName", true);
-	lua_pushstring(L, searchHandle->find->fileName.generic_u8string().c_str());
+	lua_pushstring(L, (const char*)searchHandle->find->fileName.generic_u8string().c_str());
 	return 1;
 }
 
@@ -1554,12 +1554,15 @@ static int l_Deflate(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
 	int n = lua_gettop(L);
-	ui->LAssert(L, n >= 1, "Usage: Deflate(string)");
+	ui->LAssert(L, n >= 1, "Usage: Deflate(string, [isGzip])");
 	ui->LAssert(L, lua_isstring(L, 1), "Deflate() argument 1: expected string, got %s", luaL_typename(L, 1));
+	ui->LAssert(L, lua_isboolean(L, 2) || lua_isnil(L, 2) || lua_isnone(L, 2), "Deflate() argument 2: expected boolean or nil, got %s", luaL_typename(L, 2));
+	bool isGzip = lua_toboolean(L, 2);
 	z_stream_s z;
 	z.zalloc = NULL;
 	z.zfree = NULL;
-	deflateInit(&z, 9);
+	// Adding 16 enables Gzip headers instead of ZLib headers
+	deflateInit2(&z, Z_BEST_COMPRESSION, Z_DEFLATED, MAX_WBITS + (isGzip ? 16 : 0), 8, Z_DEFAULT_STRATEGY);
 	size_t inLen;
 	byte* in = (byte*)lua_tolstring(L, 1, &inLen);
 	// Prevent deflation of input data larger than 128 MiB.
@@ -1613,7 +1616,8 @@ static int l_Inflate(lua_State* L)
 	z.zfree = NULL;
 	z.next_out = out.data();
 	z.avail_out = outSz;
-	inflateInit(&z);
+	// Adding 32 enables automatic detection of headers
+	inflateInit2(&z, MAX_WBITS + 32);
 	int err;
 	while ((err = inflate(&z, Z_NO_FLUSH)) == Z_OK) {
 		// Output buffer filled, try to embiggen it.
@@ -1652,7 +1656,7 @@ static int l_GetTime(lua_State* L)
 static int l_GetScriptPath(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
-	lua_pushstring(L, ui->scriptPath.generic_u8string().c_str());
+	lua_pushstring(L, (const char*)ui->scriptPath.generic_u8string().c_str());
 	try
 	{
 		lua_pushstring(L, ui->scriptPath.generic_string().c_str());
@@ -1669,7 +1673,7 @@ static int l_GetScriptPath(lua_State* L)
 static int l_GetRuntimePath(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
-	lua_pushstring(L, ui->sys->basePath.generic_u8string().c_str());
+	lua_pushstring(L, (const char*)ui->sys->basePath.generic_u8string().c_str());
 	try
 	{
 		lua_pushstring(L, ui->sys->basePath.generic_string().c_str());
@@ -1698,7 +1702,7 @@ static int l_GetUserPath(lua_State* L)
 		return 2;
 	}
 
-	lua_pushstring(L, userPath->generic_u8string().c_str());
+	lua_pushstring(L, (const char*)userPath->generic_u8string().c_str());
 	try
 	{
 		lua_pushstring(L, userPath->generic_string().c_str());
@@ -1778,7 +1782,7 @@ SG_LUA_CPP_FUN_END()
 static int l_GetWorkDir(lua_State* L)
 {
 	ui_main_c* ui = GetUIPtr(L);
-	lua_pushstring(L, ui->scriptWorkDir.generic_u8string().c_str());
+	lua_pushstring(L, (const char*)ui->scriptWorkDir.generic_u8string().c_str());
 	return 1;
 }
 
@@ -1859,7 +1863,7 @@ SG_LUA_CPP_FUN_BEGIN(LoadModule)
 
 	ui->sys->SetWorkDir(ui->scriptPath);
 	auto fileStr = fileName.generic_u8string();
-	int err = luaL_loadfile(L, fileStr.c_str());
+	int err = luaL_loadfile(L, (const char*)fileStr.c_str());
 	ui->sys->SetWorkDir(ui->scriptWorkDir);
 	ui->LExpect(L, err == 0, "LoadModule() error loading '%s' (%d):\n%s", fileStr.c_str(), err, lua_tostring(L, -1));
 	lua_replace(L, 1);	// Replace module name with module main chunk
@@ -1881,7 +1885,7 @@ SG_LUA_CPP_FUN_BEGIN(PLoadModule)
 	}
 
 	ui->sys->SetWorkDir(ui->scriptPath);
-	int err = luaL_loadfile(L, fileName.generic_u8string().c_str());
+	int err = luaL_loadfile(L, (const char*)fileName.generic_u8string().c_str());
 	ui->sys->SetWorkDir(ui->scriptWorkDir);
 	if (err) {
 		return 1;
@@ -2215,7 +2219,6 @@ int ui_main_c::InitAPI(lua_State* L)
 	ADDFUNC(SetDrawLayer);
 	ADDFUNC(GetDrawLayer);
 	ADDFUNC(SetViewport);
-	ADDFUNC(SetBlendMode);
 	ADDFUNC(SetDrawColor);
 	ADDFUNC(GetDrawColor);
 	ADDFUNC(SetDPIScaleOverridePercent);

@@ -1,13 +1,13 @@
 {
   "default-registry": {
     "kind": "builtin",
-    "baseline": "66c0373dc7fca549e5803087b9487edfe3aca0a1"
+    "baseline": "ec48c11eae9448c8c6e7739d93e06fa2433aa95f"
   },
   "registries": [
     {
       "kind": "filesystem",
       "path": "vcpkg-ports",
-      "baseline": "2025-10-07",
+      "baseline": "2026-09-09",
       "packages": ["angle", "glfw3", "gli", "luajit", "openssl", "pthread-stubs"]
     }
   ]
