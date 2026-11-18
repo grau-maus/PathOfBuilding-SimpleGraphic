@@ -104,6 +104,8 @@ cmrc_add_resources(SimpleGraphic-Assets
     "assets/gles/tinted_texture.frag"
     "assets/gles/tinted_texture.vert"
 )
+# Linked into the SimpleGraphic shared library on Linux, so it must be position-independent.
+set_target_properties(SimpleGraphic-Assets PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if (APPLE)
     target_sources(SimpleGraphic PRIVATE
@@ -214,9 +216,10 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
         PRIVATE
         "-export-dynamic"
     )
+    # GCC 15 warns on sol2's template bodies; older GCC does not know this flag.
     target_compile_options(SimpleGraphic
         PRIVATE
-        "-Wno-template-body"
+        "$<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,15>>:-Wno-template-body>"
     )
 endif ()
 
